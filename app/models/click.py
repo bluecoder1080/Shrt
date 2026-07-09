@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 from typing import Optional, TYPE_CHECKING
-from sqlalchemy import BigInteger, String, Text, DateTime, ForeignKey, func
+from sqlalchemy import BigInteger, String, Text, DateTime, ForeignKey, func, Boolean
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.core.database import Base
@@ -27,6 +27,26 @@ class ClickEvent(Base):
     referrer: Mapped[Optional[str]] = mapped_column(
         Text, nullable=True
     )
+    
+    # Enriched analytics columns
+    country_code: Mapped[Optional[str]] = mapped_column(
+        String(10), nullable=True
+    )
+    device_family: Mapped[Optional[str]] = mapped_column(
+        String(50), nullable=True
+    )
+    browser_family: Mapped[Optional[str]] = mapped_column(
+        String(50), nullable=True
+    )
+    os_family: Mapped[Optional[str]] = mapped_column(
+        String(50), nullable=True
+    )
+    
+    # Aggregation indexing flag
+    aggregated: Mapped[bool] = mapped_column(
+        Boolean, default=False, index=True, nullable=False
+    )
+    
     clicked_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )

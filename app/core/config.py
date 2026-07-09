@@ -17,6 +17,13 @@ class Settings(BaseSettings):
     
     ALLOWED_ORIGINS: Union[str, List[str]]
     
+    # Celery & RabbitMQ
+    CELERY_BROKER_URL: str = "amqp://guest:guest@localhost:5672//"
+    CELERY_RESULT_BACKEND: str = "redis://localhost:6379/0"
+    
+    # GeoIP Path
+    GEOIP_DATABASE_PATH: str = "app/resources/GeoLite2-Country.mmdb"
+
     @field_validator("ALLOWED_ORIGINS", mode="before")
     @classmethod
     def assemble_cors_origins(cls, v: Union[str, List[str]]) -> List[str]:
