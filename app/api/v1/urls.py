@@ -1,7 +1,9 @@
 from typing import List
-from fastapi import APIRouter, Depends, status, Request
+
+from fastapi import APIRouter, Depends, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
-from app.api.deps import get_db, get_current_user, get_current_user_optional
+
+from app.api.deps import get_current_user, get_current_user_optional, get_db
 from app.core.config import settings
 from app.core.limiter import RateLimiter
 from app.models.user import User
@@ -17,6 +19,7 @@ shorten_limiter = RateLimiter(
     endpoint_name="shorten",
 )
 
+
 @router.post(
     "/",
     response_model=URLResponse,
@@ -31,10 +34,14 @@ async def shorten_url(
 ):
     user_id = current_user.id if current_user else None
     db_url = await url_service.create_short_url(db, url_in, user_id)
-    
-    base_url = str(request.base_url)
+
+    base_url = (
+        settings.SERVER_URL.rstrip("/") + "/"
+        if settings.SERVER_URL
+        else str(request.base_url)
+    )
     short_url = f"{base_url}{db_url.short_code}"
-    
+
     return URLResponse(
         id=db_url.id,
         original_url=db_url.original_url,
@@ -45,6 +52,7 @@ async def shorten_url(
         short_url=short_url,
     )
 
+
 @router.get("/", response_model=List[URLResponse])
 async def list_urls(
     request: Request,
@@ -52,8 +60,12 @@ async def list_urls(
     current_user: User = Depends(get_current_user),
 ):
     urls = await url_service.get_user_urls(db, current_user.id)
-    base_url = str(request.base_url)
-    
+    base_url = (
+        settings.SERVER_URL.rstrip("/") + "/"
+        if settings.SERVER_URL
+        else str(request.base_url)
+    )
+
     return [
         URLResponse(
             id=u.id,
@@ -66,6 +78,7 @@ async def list_urls(
         )
         for u in urls
     ]
+
 
 @router.delete("/{short_code}", status_code=status.HTTP_204_NO_CONTENT)
 async def remove_url(

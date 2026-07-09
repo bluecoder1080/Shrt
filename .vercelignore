@@ -1,0 +1,9 @@
+# Keep the Vercel backend bundle lean — exclude everything not needed by the API
+frontend/
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+tests/
+locustfile.py
