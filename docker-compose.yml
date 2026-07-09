@@ -1,4 +1,4 @@
-version: '3.8'
+version: "3.8"
 
 services:
   db:
@@ -60,7 +60,7 @@ services:
       RATE_LIMIT_SHORTEN_MAX_REQUESTS: 20
       RATE_LIMIT_REDIRECT_WINDOW: 60
       RATE_LIMIT_REDIRECT_MAX_REQUESTS: 120
-      ALLOWED_ORIGINS: "http://localhost:3000,http://localhost:8000"
+      ALLOWED_ORIGINS: "http://localhost:3000,http://localhost:8000,http://frontend:3000"
       GEOIP_DATABASE_PATH: "app/resources/GeoLite2-Country.mmdb"
     depends_on:
       db:
@@ -105,6 +105,14 @@ services:
         condition: service_healthy
       rabbitmq:
         condition: service_healthy
+
+  frontend:
+    build: ./frontend
+    container_name: url_shortener_frontend
+    ports:
+      - "3000:3000"
+    depends_on:
+      - web
 
 volumes:
   postgres_data:
