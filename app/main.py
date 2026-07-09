@@ -1,5 +1,6 @@
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Depends, Request, BackgroundTasks, status
+from datetime import datetime, timezone
+from fastapi import FastAPI, Depends, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse, JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -10,7 +11,7 @@ from app.core.exceptions import AppError
 from app.core.limiter import RateLimiter
 from app.core.redis import redis_client
 from app.services import url as url_service
-from app.services import analytics as analytics_service
+from app.tasks.analytics import log_click_task
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -57,15 +58,12 @@ redirect_limiter = RateLimiter(
 )
 async def redirect_to_long_url(
     short_code: str,
-    background_tasks: BackgroundTasks,
     request: Request,
     db: AsyncSession = Depends(get_db),
 ):
     """
-    Resolve the short code to long URL, register click analytics in the background,
-    and redirect the visitor. We use HTTP 307 (Temporary Redirect) instead of 301
-    to prevent browsers from caching the redirection, which ensures subsequent clicks
-    are sent to our server and counted in our analytics.
+    Resolve the short code to long URL, enqueue click logging task to RabbitMQ,
+    and redirect the visitor immediately.
     """
     # 1. Resolve short_code (hits cache first)
     url_obj = await url_service.resolve_url(db, short_code)
@@ -76,13 +74,13 @@ async def redirect_to_long_url(
     user_agent = request.headers.get("user-agent")
     referrer = request.headers.get("referer")  # Referer header is misspelled in HTTP specification
     
-    # 3. Schedule async click logging background task
-    background_tasks.add_task(
-        analytics_service.record_click,
+    # 3. Push click event to RabbitMQ queue via Celery
+    log_click_task.delay(
         url_obj.id,
         ip_address,
         user_agent,
         referrer,
+        datetime.now(timezone.utc).isoformat(),
     )
     
     return RedirectResponse(

@@ -1,6 +1,6 @@
 from app.schemas.user import UserCreate, UserLogin, UserResponse, TokenResponse
 from app.schemas.url import URLCreate, URLResponse
-from app.schemas.analytics import URLAnalyticsResponse, ClickEventResponse
+from app.schemas.analytics import URLAnalyticsSummaryResponse
 
 __all__ = [
     "UserCreate",
@@ -9,6 +9,5 @@ __all__ = [
     "TokenResponse",
     "URLCreate",
     "URLResponse",
-    "URLAnalyticsResponse",
-    "ClickEventResponse",
+    "URLAnalyticsSummaryResponse",
 ]

@@ -1,30 +1,15 @@
-from typing import Dict, Any, List
-from sqlalchemy import select, func
+from collections import defaultdict
+from typing import Dict, Any
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from app.core.database import AsyncSessionLocal
 from app.models.url import URL
-from app.models.click import ClickEvent
+from app.models.summary import (
+    DailyClicksSummary,
+    CountryClicksSummary,
+    ReferrerClicksSummary,
+    DeviceClicksSummary,
+)
 from app.core.exceptions import NotFoundError, ForbiddenError
-
-async def record_click(
-    url_id: int,
-    ip_address: str | None,
-    user_agent: str | None,
-    referrer: str | None,
-) -> None:
-    """
-    Log a click event. Runs in a background task with its own database session
-    to prevent session cleanup conflicts with the main request thread.
-    """
-    async with AsyncSessionLocal() as db:
-        click = ClickEvent(
-            url_id=url_id,
-            ip_address=ip_address,
-            user_agent=user_agent,
-            referrer=referrer,
-        )
-        db.add(click)
-        await db.commit()
 
 async def get_url_analytics(db: AsyncSession, short_code: str, user_id: Any) -> Dict[str, Any]:
     # Fetch URL
@@ -36,24 +21,70 @@ async def get_url_analytics(db: AsyncSession, short_code: str, user_id: Any) -> 
     if url.user_id != user_id:
         raise ForbiddenError("Not authorized to view analytics for this URL")
 
-    # Fetch total clicks count
-    count_query = select(func.count(ClickEvent.id)).where(ClickEvent.url_id == url.id)
-    count_res = await db.execute(count_query)
-    total_clicks = count_res.scalar() or 0
-
-    # Fetch last 100 click events
-    clicks_query = (
-        select(ClickEvent)
-        .where(ClickEvent.url_id == url.id)
-        .order_by(ClickEvent.clicked_at.desc())
-        .limit(100)
+    # 1. Fetch Daily Clicks Summary (clicks over time)
+    daily_res = await db.execute(
+        select(DailyClicksSummary)
+        .where(DailyClicksSummary.url_id == url.id)
+        .order_by(DailyClicksSummary.date.asc())
     )
-    clicks_res = await db.execute(clicks_query)
-    clicks = list(clicks_res.scalars().all())
+    daily_clicks = list(daily_res.scalars().all())
+    total_clicks = sum(d.click_count for d in daily_clicks)
+
+    # 2. Fetch Country Clicks Summary
+    country_res = await db.execute(
+        select(CountryClicksSummary)
+        .where(CountryClicksSummary.url_id == url.id)
+        .order_by(CountryClicksSummary.click_count.desc())
+    )
+    country_clicks = list(country_res.scalars().all())
+
+    # 3. Fetch Referrer Clicks Summary
+    referrer_res = await db.execute(
+        select(ReferrerClicksSummary)
+        .where(ReferrerClicksSummary.url_id == url.id)
+        .order_by(ReferrerClicksSummary.click_count.desc())
+    )
+    referrer_clicks = list(referrer_res.scalars().all())
+
+    # 4. Fetch Device Clicks Summary (contains dimensions device, browser, os)
+    device_res = await db.execute(
+        select(DeviceClicksSummary)
+        .where(DeviceClicksSummary.url_id == url.id)
+    )
+    device_clicks = list(device_res.scalars().all())
+
+    # Aggregate browser/device/os counts in memory from pre-summarized subsets
+    device_counts = defaultdict(int)
+    browser_counts = defaultdict(int)
+    os_counts = defaultdict(int)
+
+    for item in device_clicks:
+        device_counts[item.device_family] += item.click_count
+        browser_counts[item.browser_family] += item.click_count
+        os_counts[item.os_family] += item.click_count
+
+    # Convert to response formats
+    device_breakdown = [
+        {"name": k, "click_count": v}
+        for k, v in sorted(device_counts.items(), key=lambda x: x[1], reverse=True)
+    ]
+    browser_breakdown = [
+        {"name": k, "click_count": v}
+        for k, v in sorted(browser_counts.items(), key=lambda x: x[1], reverse=True)
+    ]
+    os_breakdown = [
+        {"name": k, "click_count": v}
+        for k, v in sorted(os_counts.items(), key=lambda x: x[1], reverse=True)
+    ]
 
     return {
         "short_code": url.short_code,
         "original_url": url.original_url,
         "total_clicks": total_clicks,
-        "clicks": clicks,
+        "clicks_over_time": daily_clicks,
+        "top_countries": country_clicks,
+        "top_referrers": referrer_clicks,
+        "device_breakdown": device_breakdown,
+        "browser_breakdown": browser_breakdown,
+        "os_breakdown": os_breakdown,
     }
