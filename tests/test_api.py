@@ -4,16 +4,47 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from fastapi.testclient import TestClient
 from app.main import app
+from app.api.deps import get_db
 from app.core.exceptions import ConflictError, AuthenticationError, NotFoundError
 
 client = TestClient(app)
+
+# ----------------------------------------------------
+# SYSTEM HEALTH CHECK TEST
+# ----------------------------------------------------
+
+def test_health_check_healthy():
+    # Setup mock dependencies
+    mock_db = AsyncMock()
+    mock_db.execute.return_value = AsyncMock()
+    
+    app.dependency_overrides[get_db] = lambda: mock_db
+    
+    with patch("app.api.v1.health.redis_client.ping", new_callable=AsyncMock) as mock_redis_ping, \
+         patch("app.api.v1.health.kombu.Connection") as mock_kombu:
+        
+        # Mock rabbitmq connection success
+        mock_conn_instance = mock_kombu.return_value
+        mock_conn_instance.connect.return_value = None
+        mock_conn_instance.release.return_value = None
+        
+        response = client.get("/api/v1/health/")
+        assert response.status_code == 200
+        
+        data = response.json()
+        assert data["status"] == "healthy"
+        assert data["database"] == "healthy"
+        assert data["redis"] == "healthy"
+        assert data["rabbitmq"] == "healthy"
+        
+    app.dependency_overrides.clear()
+
 
 # ----------------------------------------------------
 # AUTHENTICATION ROUTE TESTS
 # ----------------------------------------------------
 
 def test_signup_validation_error():
-    # Passwords must be at least 8 characters
     response = client.post(
         "/api/v1/auth/signup",
         json={"email": "invalid-email", "password": "short"}
@@ -85,7 +116,6 @@ def test_login_failure():
 # ----------------------------------------------------
 
 def test_shorten_url_validation_error():
-    # Invalid target URL
     response = client.post(
         "/api/v1/urls/",
         json={"original_url": "not-a-valid-url"}
@@ -131,7 +161,7 @@ def test_shorten_url_custom_alias_taken():
 
 
 # ----------------------------------------------------
-# REDIRECT AND ANALYTICS TESTS
+# REDIRECT TESTS
 # ----------------------------------------------------
 
 def test_redirect_not_found():
@@ -151,7 +181,7 @@ def test_redirect_success():
     mock_url.short_code = "gb"
 
     with patch("app.main.url_service.resolve_url", new_callable=AsyncMock) as mock_resolve, \
-         patch("app.main.analytics_service.record_click") as mock_record, \
+         patch("app.main.log_click_task.delay") as mock_celery_delay, \
          patch("app.core.limiter.RateLimiter.__call__", new_callable=AsyncMock):
         mock_resolve.return_value = mock_url
         
@@ -159,3 +189,6 @@ def test_redirect_success():
         # Verify 307 Temporary Redirect code is used
         assert response.status_code == 307
         assert response.headers["location"] == "https://google.com"
+        
+        # Verify Celery delay is invoked to push task to RabbitMQ asynchronously
+        mock_celery_delay.assert_called_once()

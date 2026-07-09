@@ -1,20 +1,26 @@
-# Production-Grade URL Shortener Backend
+# Production-Grade URL Shortener Backend (with Async Analytics Pipeline)
 
-A high-performance, startup-grade URL shortener backend service built using **FastAPI**, **PostgreSQL** (via async SQLAlchemy), and **Redis**. Designed with clean architecture, rate limiting, SSRF protection, JWT-based authentication, caching, and database migrations.
+A high-performance URL shortener backend service built using **FastAPI**, **PostgreSQL** (via async SQLAlchemy), **Redis**, and **RabbitMQ** (via Celery). Designed with clean architecture, rate limiting, SSRF protection, JWT-based authentication, caching, database migrations, offline IP geolocation, and a periodic batch aggregation cron.
 
 ---
 
 ## Technical Features & Architectural Design
 
-- **Collision-Free Base62 Short Codes**: Instead of generating random short codes (which require db-retry loops on collision), we fetch the next sequence value from PostgreSQL (`urls_id_seq`) and convert it to Base62 (characters `0-9`, `a-z`, `A-Z`). This is extremely fast, collision-free, and guarantees short codes starting at 1-2 characters.
+- **Collision-Free Base62 Short Codes**: Auto-incremented sequence keys are pulled from Postgres (`urls_id_seq`) and converted to Base62. Collision-free by design, fast, and generates extremely short urls.
 - **Two-Tier Redis Caching**:
-  - **Cache Warming**: Newly shortened URLs are written to Redis immediately.
-  - **Read Caching**: The redirection lookup route reads from Redis first. If there's a cache miss, it queries PostgreSQL and writes back to Redis with a 24-hour TTL.
-  - **Cache Invalidation**: On URL deletion or expiry detection, keys are instantly evicted from Redis.
-- **SSRF Prevention**: Before shortening a URL, the host is resolved to an IP address asynchronously. Loopback, private ranges (`10.x.x.x`, `192.168.x.x`, etc.), link-local, multicast, and reserved addresses are blocked to protect internal network services.
-- **Non-Blocking Background Clicks**: Visitor clicks (IP, User-Agent, and Referrer) are logged asynchronously using FastAPI `BackgroundTasks` with short-lived database sessions. This ensures redirects are immediate (~ms) and database writes do not block the HTTP thread.
-- **Custom Sliding-Window Rate Limiting**: Implement custom sliding window limiters using Redis pipelines to protect the shorten and redirection endpoints from abuse (e.g. 20 shorten/min, 120 redirects/min). Real client IPs are detected behind reverse proxies via `X-Forwarded-For` header inspection.
-- **JWT Authentication**: Secure signup and login flow. Passwords are hashed using `bcrypt` and are never logged or exposed in HTTP responses.
+  - **Cache Warming**: Written to Redis immediately on URL creation.
+  - **Read Caching**: Redirections resolve from Redis in `O(1)` time. Cache misses query PostgreSQL and warm Redis with a 24-hour TTL.
+  - **Eviction**: Cache is updated/invalidated on URL modification or delete.
+- **SSRF Prevention**: Hostnames are resolved to IP addresses asynchronously before shortening. Loopback (`127.0.0.0/8`), private ranges (`10.0.0.0/8`, `192.168.0.0/16`, etc.), link-local, multicast, and reserved addresses are blocked to protect internal network services.
+- **Decoupled Asynchronous Analytics (Celery + RabbitMQ)**:
+  - Redirections (`GET /{short_code}`) take single-digit milliseconds. They resolve the long URL from cache, enqueue a message to RabbitMQ via Celery, and redirect the user instantly.
+  - A Celery Worker consumes the queue, parses user agents for OS/Browser/Device categories, resolves the client IP to a country code using a local MaxMind database, and writes the enriched data to `click_events` in Postgres.
+- **Incremental Summary Table Aggregation (Celery Beat)**:
+  - To prevent analytics requests from executing heavy scans on raw `click_events`, we use a scheduled Celery Beat task that aggregates clicks incrementally.
+  - An `aggregated` boolean index column tracks raw clicks. The Beat task aggregates unaggregated rows, uses PostgreSQL `ON CONFLICT DO UPDATE` (upserts) to increment counters in summary tables (`clicks_daily_summary`, `clicks_country_summary`, `clicks_referrer_summary`, `clicks_device_summary`), and marks the batch as aggregated in one transaction.
+  - The analytics dashboard retrieves data directly from summary tables in constant time.
+- **JWT Authentication**: Signup and login route. Passwords hashed using `bcrypt`.
+- **System Monitoring**: A `/health` check endpoint verifying connection status for PostgreSQL, Redis, and RabbitMQ.
 
 ---
 
@@ -24,12 +30,14 @@ A high-performance, startup-grade URL shortener backend service built using **Fa
 /
 ├── app/
 │   ├── api/
-│   │   ├── deps.py            # FastAPI dependency injection (get_db, get_redis, auth)
+│   │   ├── deps.py            # FastAPI dependency injection (get_db, auth)
 │   │   └── v1/
 │   │       ├── auth.py        # SignUp & Login endpoints
 │   │       ├── urls.py        # URL creation, deletion, listing
-│   │       └── analytics.py   # Analytics dashboards for owners
+│   │       ├── analytics.py   # Aggregated analytics dashboard
+│   │       └── health.py      # Health checks for DB, Redis, RabbitMQ
 │   ├── core/
+│   │   ├── celery_app.py      # Celery instance, Beat cron schedule configuration
 │   │   ├── config.py          # Settings validation (Pydantic Settings)
 │   │   ├── database.py        # SQLAlchemy Async engine and session factory
 │   │   ├── exceptions.py      # Structured application domain exceptions
@@ -39,111 +47,118 @@ A high-performance, startup-grade URL shortener backend service built using **Fa
 │   ├── models/                # SQLAlchemy database models
 │   ├── schemas/               # Pydantic validation schemas
 │   ├── services/              # Pure business logic layer
+│   ├── tasks/
+│   │   └── analytics.py       # Celery click logger & Beat aggregator tasks
 │   └── main.py                # App entrypoint, CORS configuration, & root redirect
 ├── migrations/                # Alembic database schema migrations
-├── tests/                     # Test suite
+├── tests/                     # Pytest suite
 ├── alembic.ini                # Alembic configuration
+├── docker-compose.yml         # Container orchestration profile
+├── Dockerfile                 # Docker container builder
+├── download_geoip.py          # Script to download GeoIP MMDB files
+├── locustfile.py              # Locust load testing script
 ├── requirements.txt           # Python package dependencies
 └── README.md                  # Project documentation
 ```
 
 ---
 
-## System Requirements
+## Quick Start via Docker Compose (Recommended)
 
-- **Python**: 3.10 or newer
-- **PostgreSQL**: 13 or newer (with an empty database named `url_shortener` created)
-- **Redis**: 6 or newer
+To run the entire system (FastAPI, PostgreSQL, Redis, RabbitMQ, Celery Worker, Celery Beat) in containers:
+
+### 1. Download GeoIP Database
+Download the free Country geolocation database:
+```powershell
+python download_geoip.py
+```
+
+### 2. Boot Service Network
+```powershell
+docker-compose up --build
+```
+This command builds the application containers, runs all database migrations automatically, and starts the services:
+- **FastAPI Backend**: `http://localhost:8000` (API Docs: `http://localhost:8000/docs`)
+- **RabbitMQ Console**: `http://localhost:15672` (User: `guest`, Password: `guest`)
 
 ---
 
-## Local Setup & Run Guide (Windows)
+## Local Setup & Run Guide (Windows Hosts)
 
-### 1. Clone & Setup Virtual Environment
-Open PowerShell inside the project directory:
+If running the services directly on your host machine without Docker:
+
+### 1. Setup Virtual Environment
 ```powershell
-# Create virtual environment
+# Create & Activate Virtual Environment
 python -m venv .venv
-
-# Activate virtual environment
 .venv\Scripts\Activate.ps1
-```
 
-### 2. Install Dependencies
-```powershell
+# Install Dependencies
 pip install -r requirements.txt
 ```
 
-### 3. Setup Local Services
-- **PostgreSQL**: Install PostgreSQL using the official Windows installer. Create a database named `url_shortener`.
-- **Redis**: You can run Redis on Windows using WSL (`wsl sudo service redis-server start`) or by downloading Memurai/Redis-Windows binaries. Ensure Redis is running on default port `6379`.
+### 2. Download Geolocation Database
+```powershell
+python download_geoip.py
+```
 
-### 4. Configure Environment Variables
-Copy `.env.example` to `.env` and fill out your local service URLs:
+### 3. Setup services
+- **PostgreSQL**: Install PostgreSQL. Create an empty database named `url_shortener`.
+- **Redis**: Install Redis (via WSL or Memurai) and run it on port `6379`.
+- **RabbitMQ**: Install RabbitMQ for Windows. Ensure it is running on default port `5672`.
+
+### 4. Configure Environment
+Copy `.env.example` to `.env` and fill out your database, redis, and rabbitmq configurations:
 ```properties
 DATABASE_URL="postgresql+asyncpg://<username>:<password>@localhost:5432/url_shortener"
 REDIS_URL="redis://localhost:6379/0"
-JWT_SECRET="generate-a-secure-random-key-in-production"
+CELERY_BROKER_URL="amqp://guest:guest@localhost:5672//"
+CELERY_RESULT_BACKEND="redis://redis:6379/0"
+JWT_SECRET="secure-random-key"
 ```
 
-### 5. Run Database Migrations
-Create the tables in your PostgreSQL database using Alembic:
+### 5. Run Migrations & Start Servers
 ```powershell
+# Apply database migrations
 alembic upgrade head
-```
 
-### 6. Start the Server
-```powershell
+# Start FastAPI API
 uvicorn app.main:app --reload
+
+# Start Celery Worker (In a separate terminal)
+celery -A app.core.celery_app.celery_app worker --loglevel=info -P solo
+
+# Start Celery Beat Scheduler (In a separate terminal)
+celery -A app.core.celery_app.celery_app beat --loglevel=info
 ```
-The server will start at `http://127.0.0.1:8000`. 
-Interactive API documentation will be available at `http://127.0.0.1:8000/docs`.
 
 ---
 
 ## Running Tests
-Run the automated test suite with pytest:
+Ensure Python tests run cleanly:
 ```powershell
 pytest
 ```
 
 ---
 
-## API Documentation
+## Load Testing with Locust
 
-### Authentication
-- `POST /api/v1/auth/signup`: Create a new user account.
-- `POST /api/v1/auth/login`: Authenticate and receive a JWT token (OAuth2 form format).
+We have included a Locust file to benchmark redirection performance.
 
-### URL Management
-- `POST /api/v1/urls/`: Shorten a URL. Accept target URL, custom alias (optional), and expiration datetime (optional). Returns short URL.
-- `GET /api/v1/urls/`: List all URLs owned by the authenticated user.
-- `DELETE /api/v1/urls/{short_code}`: Delete a shortened URL (removes it from DB and cache).
+### 1. Start Locust
+Activate the virtual environment and launch Locust:
+```powershell
+locust
+```
 
-### Analytics
-- `GET /api/v1/analytics/{short_code}`: Fetch total clicks and recent detailed logs (IP, User Agent, Referrer, timestamp) for URLs owned by you.
+### 2. Open Load Test UI
+Navigate to `http://localhost:8089` in your browser.
+- **Number of users**: e.g., `100`
+- **Spawn rate**: e.g., `10`
+- **Host**: `http://localhost:8000` (or your FastAPI server URL)
 
-### Redirection
-- `GET /{short_code}`: Resolve code and redirect to original URL via HTTP 307 (Temporary Redirect).
-
----
-
-## Deployment Guide (Cloud Setup)
-
-This application is ready to deploy directly to cloud providers like **Render** or **Railway** because it reads all secrets and configurations from standard environment variables.
-
-### Deploying to Render
-1. **Create Databases**:
-   - Provision a **Render PostgreSQL** database and copy the connection string.
-   - Provision a **Render Redis** instance and copy the connection string.
-2. **Deploy the Web Service**:
-   - Create a new **Web Service** on Render and link your GitHub repository.
-   - Select **Python** as the environment.
-   - Set **Build Command**: `pip install -r requirements.txt`
-   - Set **Start Command**: `alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port $PORT`
-3. **Environment Variables**:
-   Add the following environment variables in the Render console:
-   - `DATABASE_URL`: Set to your Render PostgreSQL connection string (replace `postgresql://` with `postgresql+asyncpg://` for async compatibility).
-   - `REDIS_URL`: Set to your Render Redis connection string.
-   - `JWT_SECRET`: A secure random password.
-   - `ALLOWED_ORIGINS`: A comma-separated list of domains allowed to request your API (e.g. `https://yourdomain.com`).
+### 3. Benchmarking Scenarios
+You can use this load test script to compare response throughput and latencies:
+1. **Cache Miss vs Cache Hit**: Test redirection when Redis cache is cleared compared to when Redis cache is warmed.
+2. **Synchronous vs Asynchronous Logging**: Compare redirection speed when database writes are done synchronously (direct write) versus when click records are deferred asynchronously to RabbitMQ (Celery pipeline).

@@ -1,0 +1,110 @@
+version: '3.8'
+
+services:
+  db:
+    image: postgres:15-alpine
+    container_name: url_shortener_db
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: url_shortener
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: url_shortener_redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    container_name: url_shortener_rabbitmq
+    ports:
+      - "5672:5672"
+      - "15672:15672" # Management dashboard
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  web:
+    build: .
+    container_name: url_shortener_web
+    command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
+    ports:
+      - "8000:8000"
+    environment:
+      PROJECT_NAME: "URL Shortener API"
+      DATABASE_URL: "postgresql+asyncpg://postgres:postgres@db:5432/url_shortener"
+      REDIS_URL: "redis://redis:6379/0"
+      CELERY_BROKER_URL: "amqp://guest:guest@rabbitmq:5672//"
+      CELERY_RESULT_BACKEND: "redis://redis:6379/0"
+      JWT_SECRET: "super-secret-dev-jwt-key-replace-in-production-1234567890"
+      JWT_ALGORITHM: "HS256"
+      ACCESS_TOKEN_EXPIRE_MINUTES: 60
+      RATE_LIMIT_SHORTEN_WINDOW: 60
+      RATE_LIMIT_SHORTEN_MAX_REQUESTS: 20
+      RATE_LIMIT_REDIRECT_WINDOW: 60
+      RATE_LIMIT_REDIRECT_MAX_REQUESTS: 120
+      ALLOWED_ORIGINS: "http://localhost:3000,http://localhost:8000"
+      GEOIP_DATABASE_PATH: "app/resources/GeoLite2-Country.mmdb"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+  celery_worker:
+    build: .
+    container_name: url_shortener_worker
+    command: celery -A app.core.celery_app.celery_app worker --loglevel=info
+    environment:
+      DATABASE_URL: "postgresql+asyncpg://postgres:postgres@db:5432/url_shortener"
+      REDIS_URL: "redis://redis:6379/0"
+      CELERY_BROKER_URL: "amqp://guest:guest@rabbitmq:5672//"
+      CELERY_RESULT_BACKEND: "redis://redis:6379/0"
+      GEOIP_DATABASE_PATH: "app/resources/GeoLite2-Country.mmdb"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+  celery_beat:
+    build: .
+    container_name: url_shortener_beat
+    command: celery -A app.core.celery_app.celery_app beat --loglevel=info
+    environment:
+      DATABASE_URL: "postgresql+asyncpg://postgres:postgres@db:5432/url_shortener"
+      REDIS_URL: "redis://redis:6379/0"
+      CELERY_BROKER_URL: "amqp://guest:guest@rabbitmq:5672//"
+      CELERY_RESULT_BACKEND: "redis://redis:6379/0"
+      GEOIP_DATABASE_PATH: "app/resources/GeoLite2-Country.mmdb"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
